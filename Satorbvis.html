@@ -1,142 +1,550 @@
-<!DOCTYPE html>
+<div id="orbitContainer" style="width: 100%; height: 600px; background: #05080f; border-radius: 8px; overflow: hidden; position: relative; box-shadow: 0 2px 12px rgba(0,0,0,0.4);">
+  <!-- 加载提示层 -->
+  <div id="loadingOverlay" style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 20; background: #05080f; transition: opacity 0.8s ease; pointer-events: none;">
+    <div style="width: 48px; height: 48px; border: 3px solid #1a2a6c; border-top-color: #447ff5; border-radius: 50%; animation: spin 1s linear infinite;"></div>
+    <div id="statusMessage" style="color: #8899bb; font-family: 'Segoe UI', 'PingFang SC', sans-serif; margin-top: 20px; font-size: 15px; letter-spacing: 0.5px;">🛰️ 正在加载轨道数据...</div>
+  </div>
+  
+  <!-- 底部信息栏 -->
+  <div id="infoBar" style="position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); background: rgba(5,8,15,0.85); backdrop-filter: blur(8px); padding: 8px 24px; border-radius: 20px; border: 1px solid rgba(68,127,245,0.2); z-index: 15; color: #aabbdd; font-family: 'Segoe UI', 'PingFang SC', sans-serif; font-size: 13px; display: flex; gap: 24px; align-items: center; pointer-events: none; white-space: nowrap;">
+    <span id="satIdDisplay">🛰️ 卫星: {{norad}}</span>
+    <span id="altDisplay">📏 高度: -- km</span>
+    <span id="speedDisplay">💫 速度: -- km/s</span>
+    <span id="timeDisplay">🕐 --:--:--</span>
+  </div>
+  
+  <!-- 操作提示 -->
+  <div style="position: absolute; bottom: 80px; left: 50%; transform: translateX(-50%); z-index: 12; color: rgba(136,153,187,0.4); font-family: 'Segoe UI', sans-serif; font-size: 12px; pointer-events: none; text-align: center; user-select: none;">
+    🖱️ 拖动旋转 · 滚轮缩放 · 自动旋转中
+  </div>
+</div>
+
 <style>
-    body {
-        margin: 0;
-    }
-
-    canvas {
-        display: block;
-    }
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+#orbitContainer canvas {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+}
+@media (max-width: 640px) {
+  #infoBar {
+    font-size: 11px !important;
+    padding: 6px 14px !important;
+    gap: 12px !important;
+    flex-wrap: wrap;
+    justify-content: center;
+    bottom: 12px !important;
+    white-space: normal !important;
+  }
+  #orbitContainer {
+    height: 450px !important;
+  }
+}
 </style>
+
+<!-- 引入 Three.js 核心库与扩展 -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three-orbitcontrols@2.110.3/OrbitControls.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/satellite-js@4.1.4/dist/udm/satellite.min.js"></script>
+
 <script>
-    window.onload = () => {
-        function parseTLE() {
-            const line0 = document.getElementById("tleLine0").innerHTML;
-            const line1 = document.getElementById("tleLine1").innerHTML;
-            const line2 = document.getElementById("tleLine2").innerHTML;
+(function() {
+    // ============================================================
+    // 1. 获取参数（从 Mustache 渲染的变量中读取）
+    // ============================================================
+    // Mustache 渲染时，{{norad}} 会被替换为实际值
+    // 我们通过页面上的文本内容或 data 属性获取
+    const satIdDisplay = document.getElementById('satIdDisplay');
+    const noradText = satIdDisplay.textContent.replace('🛰️ 卫星: ', '').trim();
+    const noradId = noradText || '{{norad}}'; // 如果 Mustache 未渲染，fallback 到字面量
+    
+    // 如果 noradId 还是模板变量（说明未正确替换），尝试从 URL 获取
+    const finalNorad = (noradId === '{{norad}}' || noradId === '') 
+      ? new URLSearchParams(window.location.search).get('norad') || new URLSearchParams(window.location.search).get('CATNR')
+      : noradId;
 
-            // 解析第二行
-            const noradCatId = parseInt(line1.substring(2, 7));
-            const classification = line1.substring(7, 8);
-            const internationalDesignatorLaunchYear = parseInt(line1.substring(9, 11));
-            const internationalDesignatorLaunchNumber = parseInt(line1.substring(11, 14));
-            const pieceOfLaunch = line1.substring(14, 17).trim();
-            const epochYear = parseInt(line1.substring(18, 20)) % 100;
-            const epochDay = parseFloat(line1.substring(20, 32));
-            const meanMotionDerivative = parseFloat(line1.substring(33, 43));
-            const meanMotionSecondDerivative = parseFloat(line1.substring(44, 52));
-            const bstarDragTerm = parseFloat(line1.substring(53, 61));
-            const ephemerisType = parseInt(line1.substring(62, 63));
-            const elementSetNumber = parseInt(line1.substring(64, 68));
+    const container = document.getElementById('orbitContainer');
+    const statusMsg = document.getElementById('statusMessage');
+    const loadingOverlay = document.getElementById('loadingOverlay');
+    const altDisplay = document.getElementById('altDisplay');
+    const speedDisplay = document.getElementById('speedDisplay');
+    const timeDisplay = document.getElementById('timeDisplay');
 
-            // 解析第三行
-            const inclination = parseFloat(line2.substring(8, 16)) * Math.PI / 180; // 将轨道倾角从度转换为弧度
-            const rightAscensionAscendingNode = parseFloat(line2.substring(17, 25)) * Math.PI / 180; // 将升交点经度从度转换为弧度
-            const eccentricity = parseFloat("0." + line2.substring(26, 33));
-            const argumentPerigee = parseFloat(line2.substring(34, 42)) * Math.PI / 180; // 将近心点辐角从度转换为弧度
-            const meanAnomaly = parseFloat(line2.substring(43, 51)) * Math.PI / 180; // 将平均近点角从度转换为弧度
-            const meanMotion = parseFloat(line2.substring(52, 63));
-            const revolutionNumberAtEpoch = parseInt(line2.substring(63, 68));
-
-            // 根据地球引力常数和平均运动计算半长轴
-            const muEarth = 3.986004418E+14; // 地球引力常数 (m^3/s^2)
-            const n = meanMotion * 2 * Math.PI / 86400; // 平均运动 (rad/s)
-            const a = Math.pow(muEarth / (n ** 2), 1 / 3) / 1000; // 半长轴 (km)
-
-            // 使用牛顿-拉弗森法求解偏近点角 E
-            let E = meanAnomaly; // 初始猜测值
-            const tolerance = 1e-8;
-            const maxIterations = 100;
-            let iteration = 0;
-            let f;
-
-            do {
-                f = E - eccentricity * Math.sin(E) - meanAnomaly;
-                const df = 1 - eccentricity * Math.cos(E);
-                E = E - f / df;
-                iteration++;
-            } while (Math.abs(f) > tolerance && iteration < maxIterations);
-
-            // 计算真近点角 φ
-            const trueAnomaly = 2 * Math.atan(Math.sqrt((1 + eccentricity) / (1 - eccentricity)) * Math.tan(E / 2)); // 真近点角 (弧度)
-            // 计算轨道六根数
-            const orbitalElements = [
-                a,                  // 半长轴 (km)
-                eccentricity,       // 离心率
-                inclination,        // 轨道倾角 (弧度)
-                argumentPerigee,    // 近心点辐角 (弧度)
-                rightAscensionAscendingNode, // 升交点经度 (弧度)
-                trueAnomaly         // 真近点角 (弧度)
-            ];
-            return orbitalElements;
-        }
-        if (typeof globalThis.orbitalElements == 'undefined') {
-            const orbitalElements = parseTLE();
-        }
-        const earthRadius = 6371;
-        // 轨道六根数
-        const a = orbitalElements[0]; // 半长轴 (km)
-        const e = orbitalElements[1]; // 离心率
-        const i = orbitalElements[2]; // 轨道倾角 (弧度)
-        const omega = orbitalElements[3]; // 近地点幅角 (弧度)
-        const Omega = orbitalElements[4]; // 升交点经度 (弧度)
-
-        // 创建场景、相机和渲染器
-        const scene = new THREE.Scene();
-        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 10000);
-        const renderer = new THREE.WebGLRenderer();
-        renderer.setSize(window.innerWidth, window.innerHeight);
-        document.body.appendChild(renderer.domElement);
-
-        // 添加地球
-        const earthGeometry = new THREE.SphereGeometry(earthRadius, 32, 32);
-        const earthMaterial = new THREE.MeshBasicMaterial({ color: 0x0000ff });
-        const earth = new THREE.Mesh(earthGeometry, earthMaterial);
-        scene.add(earth);
-
-        // 计算轨道上的点
-        function calculateOrbitPoints(a, e, i, Omega, omega) {
-            const points = [];
-            for (let theta = 0; theta <= 2 * Math.PI; theta += 0.01) {
-                const r = a * (1 - e * e) / (1 + e * Math.cos(theta));
-                const xPrime = r * Math.cos(theta);
-                const yPrime = r * Math.sin(theta);
-                const x = xPrime * (Math.cos(Omega) * Math.cos(omega) - Math.sin(Omega) * Math.sin(omega) * Math.cos(i)) -
-                    yPrime * (Math.sin(Omega) * Math.cos(omega) + Math.cos(Omega) * Math.sin(omega) * Math.cos(i));
-                const y = xPrime * (Math.cos(Omega) * Math.sin(omega) + Math.sin(Omega) * Math.cos(omega) * Math.cos(i)) +
-                    yPrime * (-Math.sin(Omega) * Math.sin(omega) + Math.cos(Omega) * Math.cos(omega) * Math.cos(i));
-                const z = xPrime * (Math.sin(omega) * Math.sin(i)) + yPrime * (Math.cos(omega) * Math.sin(i));
-                points.push(new THREE.Vector3(x, y, z));
-            }
-            return points;
-        }
-
-        // 绘制轨道
-        const orbitPoints = calculateOrbitPoints(a, e, i, Omega, omega);
-        const orbitGeometry = new THREE.BufferGeometry().setFromPoints(orbitPoints);
-        const orbitMaterial = new THREE.LineBasicMaterial({ color: 0xff0000 });
-        const orbitLine = new THREE.Line(orbitGeometry, orbitMaterial);
-        scene.add(orbitLine);
-
-        // 设置相机位置
-        camera.position.z = 15000;
-
-        // 渲染循环
-        function animate() {
-            requestAnimationFrame(animate);
-            renderer.render(scene, camera);
-        }
-
-        animate();
-
-        // 处理窗口大小变化
-        window.addEventListener('resize', () => {
-            const width = window.innerWidth;
-            const height = window.innerHeight;
-            renderer.setSize(width, height);
-            camera.aspect = width / height;
-            camera.updateProjectionMatrix();
-        });
+    if (!finalNorad || !/^\d+$/.test(finalNorad)) {
+      statusMsg.innerHTML = '❌ 错误：无效或缺失 NORAD ID';
+      loadingOverlay.style.background = 'rgba(5,8,15,0.95)';
+      return;
     }
+
+    // 更新卫星ID显示
+    satIdDisplay.textContent = `🛰️ 卫星: ${finalNorad}`;
+
+    // ============================================================
+    // 2. Three.js 场景初始化
+    // ============================================================
+    const width = container.clientWidth;
+    const height = container.clientHeight;
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x05080f);
+
+    const camera = new THREE.PerspectiveCamera(40, width / height, 0.1, 1000);
+    camera.position.set(4, 2.5, 6);
+
+    const renderer = new THREE.WebGLRenderer({ 
+      antialias: true,
+      alpha: false
+    });
+    renderer.setSize(width, height);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.2;
+    container.appendChild(renderer.domElement);
+
+    const controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+    controls.autoRotate = true;
+    controls.autoRotateSpeed = 0.6;
+    controls.minDistance = 2.2;
+    controls.maxDistance = 20;
+    controls.target.set(0, 0, 0);
+
+    // ============================================================
+    // 3. 光照系统
+    // ============================================================
+    const ambientLight = new THREE.AmbientLight(0x223366, 0.6);
+    scene.add(ambientLight);
+
+    const mainLight = new THREE.DirectionalLight(0xffffff, 1.2);
+    mainLight.position.set(2, 5, 3);
+    mainLight.castShadow = true;
+    scene.add(mainLight);
+
+    const fillLight = new THREE.DirectionalLight(0x4488ff, 0.3);
+    fillLight.position.set(-3, -1, -2);
+    scene.add(fillLight);
+
+    const rimLight = new THREE.DirectionalLight(0x88bbff, 0.5);
+    rimLight.position.set(-1, 2, -4);
+    scene.add(rimLight);
+
+    // ============================================================
+    // 4. 星空背景
+    // ============================================================
+    const starsGeometry = new THREE.BufferGeometry();
+    const starsCount = 3000;
+    const starPositions = new Float32Array(starsCount * 3);
+    const starColors = new Float32Array(starsCount * 3);
+    const starSizes = new Float32Array(starsCount);
+    
+    for (let i = 0; i < starsCount; i++) {
+      const r = 50 + Math.random() * 150;
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos(2 * Math.random() - 1);
+      starPositions[i*3] = r * Math.sin(phi) * Math.cos(theta);
+      starPositions[i*3+1] = r * Math.cos(phi);
+      starPositions[i*3+2] = r * Math.sin(phi) * Math.sin(theta);
+      
+      const brightness = 0.3 + Math.random() * 0.7;
+      starColors[i*3] = brightness;
+      starColors[i*3+1] = brightness * (0.7 + Math.random() * 0.3);
+      starColors[i*3+2] = brightness * (0.6 + Math.random() * 0.4);
+      
+      starSizes[i] = 0.2 + Math.random() * 0.6;
+    }
+    
+    starsGeometry.setAttribute('position', new THREE.BufferAttribute(starPositions, 3));
+    starsGeometry.setAttribute('color', new THREE.BufferAttribute(starColors, 3));
+    starsGeometry.setAttribute('size', new THREE.BufferAttribute(starSizes, 1));
+    
+    const starsMaterial = new THREE.PointsMaterial({
+      size: 0.3,
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.9,
+      blending: THREE.AdditiveBlending,
+      sizeAttenuation: true
+    });
+    const stars = new THREE.Points(starsGeometry, starsMaterial);
+    scene.add(stars);
+
+    // ============================================================
+    // 5. 地球模型（程序化生成）
+    // ============================================================
+    const earthRadius = 1;
+    const earthGeometry = new THREE.SphereGeometry(earthRadius, 64, 64);
+    
+    const canvas = document.createElement('canvas');
+    canvas.width = 1024;
+    canvas.height = 512;
+    const ctx = canvas.getContext('2d');
+    
+    const gradient = ctx.createRadialGradient(512, 256, 0, 512, 256, 400);
+    gradient.addColorStop(0, '#1a3a7a');
+    gradient.addColorStop(0.5, '#0d224a');
+    gradient.addColorStop(1, '#061230');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, 1024, 512);
+    
+    // 简化大陆
+    const continents = [
+      [[350,180],[420,160],[480,170],[520,190],[540,210],[500,230],[460,220],[420,240],[380,230],[340,210]],
+      [[480,240],[510,250],[520,280],[500,300],[480,310],[460,290],[450,270],[460,250]],
+      [[180,170],[220,155],[260,160],[280,180],[270,200],[240,210],[200,200],[180,190]],
+      [[240,240],[270,235],[290,250],[285,280],[260,300],[240,290],[230,270]],
+      [[560,330],[590,325],[600,340],[580,350],[560,345]],
+      [[100,400],[200,380],[300,370],[400,360],[500,370],[600,380],[700,390],[600,420],[500,430],[400,440],[300,430],[200,420]]
+    ];
+    
+    ctx.fillStyle = '#2a6a3a';
+    ctx.shadowColor = 'rgba(50,180,80,0.2)';
+    ctx.shadowBlur = 10;
+    continents.forEach(points => {
+      ctx.beginPath();
+      ctx.moveTo(points[0][0], points[0][1]);
+      for (let i = 1; i < points.length; i++) {
+        ctx.lineTo(points[i][0], points[i][1]);
+      }
+      ctx.closePath();
+      ctx.fill();
+    });
+    ctx.shadowBlur = 0;
+    
+    // 云层
+    for (let i = 0; i < 200; i++) {
+      const x = Math.random() * 1024;
+      const y = Math.random() * 512;
+      const r = 5 + Math.random() * 30;
+      const alpha = 0.03 + Math.random() * 0.06;
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(255,255,255,${alpha})`;
+      ctx.fill();
+    }
+    
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.ClampToEdgeWrapping;
+    
+    const earthMaterial = new THREE.MeshPhongMaterial({
+      map: texture,
+      emissive: new THREE.Color(0x112266),
+      emissiveIntensity: 0.15,
+      specular: new THREE.Color(0x334488),
+      shininess: 25,
+    });
+    const earth = new THREE.Mesh(earthGeometry, earthMaterial);
+    earth.castShadow = true;
+    earth.receiveShadow = true;
+    scene.add(earth);
+
+    // 大气层
+    const glowGeometry = new THREE.SphereGeometry(earthRadius * 1.025, 48, 48);
+    const glowMaterial = new THREE.MeshPhongMaterial({
+      color: 0x4488ff,
+      transparent: true,
+      opacity: 0.08,
+      side: THREE.BackSide,
+      emissive: 0x224488,
+      emissiveIntensity: 0.1
+    });
+    const glow = new THREE.Mesh(glowGeometry, glowMaterial);
+    scene.add(glow);
+
+    // 经纬网格
+    const gridSphere = new THREE.SphereGeometry(earthRadius * 1.002, 36, 24);
+    const gridEdges = new THREE.EdgesGeometry(gridSphere);
+    const gridLineMat = new THREE.LineBasicMaterial({
+      color: 0x3355aa,
+      transparent: true,
+      opacity: 0.1
+    });
+    const gridLines = new THREE.LineSegments(gridEdges, gridLineMat);
+    scene.add(gridLines);
+
+    // 赤道
+    const eqPoints = [];
+    const segments = 64;
+    for (let i = 0; i <= segments; i++) {
+      const theta = (i / segments) * Math.PI * 2;
+      eqPoints.push(new THREE.Vector3(
+        earthRadius * 1.005 * Math.cos(theta),
+        0,
+        earthRadius * 1.005 * Math.sin(theta)
+      ));
+    }
+    const eqGeo = new THREE.BufferGeometry().setFromPoints(eqPoints);
+    const eqMat = new THREE.LineBasicMaterial({
+      color: 0x447ff5,
+      transparent: true,
+      opacity: 0.15
+    });
+    const eqLine = new THREE.Line(eqGeo, eqMat);
+    scene.add(eqLine);
+
+    // ============================================================
+    // 6. 轨道与卫星
+    // ============================================================
+    let orbitLine = null;
+    let orbitDots = null;
+    let satelliteMesh = null;
+    let satelliteGlow = null;
+    let trailLine = null;
+    let velocityVector = null;
+    const SAT_SCALE = 1.8;
+
+    // ============================================================
+    // 7. 获取 TLE 并计算轨道
+    // ============================================================
+    statusMsg.textContent = `📡 获取卫星 ${finalNorad} 数据...`;
+    const tleApiUrl = `https://celestrak.org/NORAD/elements/gp.php?CATNR=${finalNorad}&FORMAT=TLE`;
+
+    fetch(tleApiUrl, {
+      method: 'GET',
+      headers: { 'Accept': 'text/plain' }
+    })
+    .then(response => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.text();
+    })
+    .then(tleText => {
+      const lines = tleText.trim().split('\n').filter(l => l.trim().length > 0);
+      if (lines.length < 2) throw new Error('TLE 数据不完整');
+      
+      const tle1 = lines[lines.length - 2];
+      const tle2 = lines[lines.length - 1];
+      
+      if (tle1.length < 60 || tle2.length < 60) throw new Error('TLE 格式无效');
+      
+      statusMsg.textContent = '✅ 计算轨道中...';
+      
+      const satrec = satellite.twoline2satrec(tle1, tle2);
+      const now = new Date();
+      
+      const posEci = satellite.propagate(satrec, now);
+      if (!posEci || !posEci.position) throw new Error('位置计算失败');
+      
+      function eciToScene(eciPos) {
+        return new THREE.Vector3(
+          eciPos.x * SAT_SCALE,
+          eciPos.z * SAT_SCALE,
+          eciPos.y * SAT_SCALE
+        );
+      }
+      
+      const currentPos = eciToScene(posEci.position);
+      
+      // 轨道轨迹
+      const orbitPoints = [];
+      const steps = 150;
+      const stepMinutes = 1;
+      for (let i = 0; i <= steps; i++) {
+        const t = new Date(now.getTime() + i * stepMinutes * 60000);
+        const p = satellite.propagate(satrec, t);
+        if (p && p.position) {
+          orbitPoints.push(eciToScene(p.position));
+        }
+      }
+      
+      if (orbitPoints.length < 2) throw new Error('轨道点不足');
+      
+      // 轨道线
+      const orbitGeo = new THREE.BufferGeometry().setFromPoints(orbitPoints);
+      const orbitMat = new THREE.LineBasicMaterial({
+        color: 0x447ff5,
+        transparent: true,
+        opacity: 0.6
+      });
+      orbitLine = new THREE.Line(orbitGeo, orbitMat);
+      scene.add(orbitLine);
+      
+      // 发光衬线
+      const glowOrbitMat = new THREE.LineBasicMaterial({
+        color: 0x4488ff,
+        transparent: true,
+        opacity: 0.15
+      });
+      const glowOrbit = new THREE.Line(orbitGeo.clone(), glowOrbitMat);
+      glowOrbit.scale.set(1.005, 1.005, 1.005);
+      scene.add(glowOrbit);
+      
+      // 轨道点阵
+      const dotPositions = orbitPoints.filter((_, i) => i % 5 === 0);
+      const dotGeo = new THREE.BufferGeometry().setFromPoints(dotPositions);
+      const dotMat = new THREE.PointsMaterial({
+        color: 0x4488ff,
+        size: 0.025,
+        transparent: true,
+        opacity: 0.3,
+        blending: THREE.AdditiveBlending
+      });
+      orbitDots = new THREE.Points(dotGeo, dotMat);
+      scene.add(orbitDots);
+      
+      // 卫星标记
+      satelliteMesh = new THREE.Mesh(
+        new THREE.SphereGeometry(0.07, 16, 16),
+        new THREE.MeshBasicMaterial({ color: 0xffdd44 })
+      );
+      satelliteMesh.position.copy(currentPos);
+      scene.add(satelliteMesh);
+      
+      satelliteGlow = new THREE.Mesh(
+        new THREE.SphereGeometry(0.14, 16, 16),
+        new THREE.MeshBasicMaterial({
+          color: 0x447ff5,
+          transparent: true,
+          opacity: 0.25,
+          blending: THREE.AdditiveBlending
+        })
+      );
+      satelliteGlow.position.copy(currentPos);
+      scene.add(satelliteGlow);
+      
+      // 光晕环
+      const ringGeo = new THREE.RingGeometry(0.12, 0.16, 32);
+      const ringMat = new THREE.MeshBasicMaterial({
+        color: 0x447ff5,
+        transparent: true,
+        opacity: 0.2,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending
+      });
+      const ring = new THREE.Mesh(ringGeo, ringMat);
+      ring.position.copy(currentPos);
+      ring.lookAt(camera.position);
+      scene.add(ring);
+      
+      // 尾迹
+      const trailPoints = [];
+      for (let i = 0; i < 10; i++) {
+        const t = new Date(now.getTime() - i * 15 * 1000);
+        const p = satellite.propagate(satrec, t);
+        if (p && p.position) {
+          trailPoints.push(eciToScene(p.position));
+        }
+      }
+      if (trailPoints.length > 1) {
+        const trailGeo = new THREE.BufferGeometry().setFromPoints(trailPoints);
+        const trailMat = new THREE.LineBasicMaterial({
+          color: 0xff8844,
+          transparent: true,
+          opacity: 0.4
+        });
+        trailLine = new THREE.Line(trailGeo, trailMat);
+        scene.add(trailLine);
+      }
+      
+      // 速度向量
+      const nextPos = satellite.propagate(satrec, new Date(now.getTime() + 10000));
+      if (nextPos && nextPos.position) {
+        const nextScene = eciToScene(nextPos.position);
+        const dir = new THREE.Vector3().copy(nextScene).sub(currentPos).normalize();
+        const arrowLen = 0.3;
+        const arrowEnd = new THREE.Vector3().copy(currentPos).add(dir.multiplyScalar(arrowLen));
+        
+        const arrowGeo = new THREE.BufferGeometry().setFromPoints([
+          currentPos.clone(),
+          arrowEnd
+        ]);
+        const arrowMat = new THREE.LineBasicMaterial({
+          color: 0xff6644,
+          transparent: true,
+          opacity: 0.5
+        });
+        velocityVector = new THREE.Line(arrowGeo, arrowMat);
+        scene.add(velocityVector);
+      }
+      
+      // 信息栏更新
+      const gd = satellite.gd(satrec);
+      const heightKm = (gd.height * 6371).toFixed(0);
+      altDisplay.textContent = `📏 高度: ${heightKm} km`;
+      
+      const speedKmS = (gd.velocity * 7.905).toFixed(2);
+      speedDisplay.textContent = `💫 速度: ${speedKmS} km/s`;
+      
+      timeDisplay.textContent = `🕐 ${now.toLocaleTimeString('zh-CN', { hour12: false })}`;
+      
+      controls.target.copy(currentPos);
+      camera.position.set(
+        currentPos.x + 2.5,
+        currentPos.y + 1.8,
+        currentPos.z + 2.5
+      );
+      controls.update();
+      
+      // 隐藏加载层
+      loadingOverlay.style.opacity = '0';
+      setTimeout(() => {
+        loadingOverlay.style.display = 'none';
+      }, 800);
+      
+      // ============================================================
+      // 8. 动画循环
+      // ============================================================
+      let lastUpdate = Date.now();
+      
+      function animate() {
+        requestAnimationFrame(animate);
+        
+        if (Date.now() - lastUpdate > 2000) {
+          lastUpdate = Date.now();
+          const newNow = new Date();
+          const newPos = satellite.propagate(satrec, newNow);
+          if (newPos && newPos.position) {
+            const newScenePos = eciToScene(newPos.position);
+            if (satelliteMesh) satelliteMesh.position.copy(newScenePos);
+            if (satelliteGlow) satelliteGlow.position.copy(newScenePos);
+            
+            const newGd = satellite.gd(satrec);
+            altDisplay.textContent = `📏 高度: ${(newGd.height * 6371).toFixed(0)} km`;
+            timeDisplay.textContent = `🕐 ${newNow.toLocaleTimeString('zh-CN', { hour12: false })}`;
+          }
+        }
+        
+        earth.rotation.y += 0.0008;
+        glow.rotation.y += 0.0008;
+        gridLines.rotation.y += 0.0008;
+        eqLine.rotation.y += 0.0008;
+        stars.rotation.y += 0.00005;
+        
+        controls.update();
+        renderer.render(scene, camera);
+      }
+      animate();
+      
+    })
+    .catch(error => {
+      console.error('Orbit visualization error:', error);
+      statusMsg.textContent = `❌ 加载失败: ${error.message}`;
+      loadingOverlay.style.background = 'rgba(5,8,15,0.95)';
+      
+      container.innerHTML += `
+        <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);z-index:25;text-align:center;color:#8899bb;font-family:'Segoe UI',sans-serif;pointer-events:none;">
+          <div style="font-size:48px;margin-bottom:16px;">🚫</div>
+          <div style="font-size:16px;font-weight:500;">无法获取轨道数据</div>
+          <div style="font-size:13px;color:#667799;margin-top:8px;max-width:400px;">${error.message}</div>
+          <div style="font-size:12px;color:#445566;margin-top:12px;">请检查 NORAD ID 是否正确，或稍后重试</div>
+        </div>
+      `;
+    });
+
+    // ============================================================
+    // 9. 窗口自适应
+    // ============================================================
+    window.addEventListener('resize', () => {
+      const w = container.clientWidth;
+      const h = container.clientHeight;
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h);
+    });
+
+})();
 </script>
